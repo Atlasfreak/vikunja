@@ -83,6 +83,7 @@ type item struct {
 	UserID         string      `json:"user_id"`
 	ProjectID      string      `json:"project_id"`
 	Content        string      `json:"content"`
+	Description    string      `json:"description"`
 	Priority       int64       `json:"priority"`
 	Due            *dueDate    `json:"due"`
 	ParentID       string      `json:"parent_id"`
@@ -404,10 +405,11 @@ func convertTodoistToVikunja(sync *sync, doneItems map[string]*doneItem) (fullVi
 
 		task := &models.TaskWithComments{
 			Task: models.Task{
-				Title:    i.Content,
-				Created:  i.DateAdded.In(config.GetTimeZone()),
-				Done:     i.Checked,
-				BucketID: sections[i.SectionID],
+				Title:       i.Content,
+				Description: i.Description,
+				Created:     i.DateAdded.In(config.GetTimeZone()),
+				Done:        i.Checked,
+				BucketID:    sections[i.SectionID],
 			},
 		}
 
@@ -591,7 +593,7 @@ func getAccessTokenFromAuthToken(authToken string) (accessToken string, err erro
 	if resp.StatusCode > 399 {
 		buf := &bytes.Buffer{}
 		_, _ = buf.ReadFrom(resp.Body)
-		return "", fmt.Errorf("got http status %d while trying to get token, error was %s", resp.StatusCode, buf.String())
+		return "", fmt.Errorf("could not get todoist access token: %w", migration.NewErrUpstreamRequestFailed("todoist oauth", resp.StatusCode, buf.String()))
 	}
 
 	token := &apiTokenResponse{}

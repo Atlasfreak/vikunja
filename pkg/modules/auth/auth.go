@@ -224,8 +224,21 @@ func NewLinkShareJWTAuthtoken(share *models.LinkSharing) (token string, err erro
 	return t.SignedString([]byte(config.ServiceSecret.GetString()))
 }
 
+// HasAuthInContext reports whether the request carries credentials at all.
+func HasAuthInContext(c *echo.Context) bool {
+	if c.Get("api_token") != nil {
+		return true
+	}
+	_, is := c.Get("user").(*jwt.Token)
+	return is
+}
+
 // GetAuthFromClaims returns a web.Auth object from jwt claims
 func GetAuthFromClaims(c *echo.Context) (a web.Auth, err error) {
+	// The token middleware already loaded the owner; a lookup per call showed up as two extra transactions per request.
+	if u, ok := c.Get("api_user").(*user.User); ok {
+		return u, nil
+	}
 	// check if we have a token in context and use it if that's the case
 	if c.Get("api_token") != nil {
 		apiToken := c.Get("api_token").(*models.APIToken)
@@ -263,7 +276,7 @@ func GetAuthFromClaims(c *echo.Context) (a web.Auth, err error) {
 // and returns the token and its owner. This is the shared validation logic used
 // by both the HTTP middleware and WebSocket auth.
 func ValidateAPITokenString(tokenString string) (*models.APIToken, *user.User, error) {
-	s := db.NewSession()
+	s := db.NewReadSession()
 	defer s.Close()
 
 	token, err := models.GetTokenFromTokenString(s, tokenString)
@@ -465,8 +478,8 @@ func SessionIDFromContext(c *echo.Context) string {
 // humabridge group middleware stashes the *echo.Context under EchoContextKey
 // first.
 func GetAuthFromContext(ctx context.Context) (web.Auth, error) {
-	ec, ok := ctx.Value(humabridge.EchoContextKey).(*echo.Context)
-	if !ok {
+	ec := humabridge.EchoContextFrom(ctx)
+	if ec == nil {
 		return nil, fmt.Errorf("no echo.Context on request context; are you calling GetAuthFromContext from a Huma handler mounted via humabridge?")
 	}
 	return GetAuthFromClaims(ec)

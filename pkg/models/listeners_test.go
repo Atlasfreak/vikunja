@@ -21,6 +21,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -34,6 +36,7 @@ import (
 	"code.vikunja.io/api/pkg/license"
 	"code.vikunja.io/api/pkg/user"
 
+	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"xorm.io/xorm"
@@ -281,11 +284,9 @@ func TestUpdateTasksInSavedFilterViews_AccessViaShareOrParent(t *testing.T) {
 			noAccessID     int64 = 2
 		)
 		parentProjectID := int64(9990)
-		_, err := s.Insert(&Project{ID: parentProjectID, Title: "ancestor parent", Identifier: "ANCPARENT", OwnerID: parentOwnerID})
-		require.NoError(t, err)
-		_, err = s.Insert(&Project{ID: childProjectID, Title: "ancestor child", Identifier: "ANCCHILD", OwnerID: childOwnerID, ParentProjectID: &parentProjectID})
-		require.NoError(t, err)
-		_, err = s.Insert(&Task{ID: taskID, Title: "child project task", ProjectID: childProjectID, Index: 1, CreatedByID: childOwnerID})
+		insertTestProject(t, s, &Project{ID: parentProjectID, Title: "ancestor parent", Identifier: "ANCPARENT", OwnerID: parentOwnerID})
+		insertTestProject(t, s, &Project{ID: childProjectID, Title: "ancestor child", Identifier: "ANCCHILD", OwnerID: childOwnerID, ParentProjectID: &parentProjectID})
+		_, err := s.Insert(&Task{ID: taskID, Title: "child project task", ProjectID: childProjectID, Index: 1, CreatedByID: childOwnerID})
 		require.NoError(t, err)
 
 		parentOwnerView, _ := createKanbanFilterView(t, s, 9999, 9999, parentOwnerID, "done = false")
@@ -586,8 +587,7 @@ func TestSubscriberNotifications_SkipUsersWithoutReadAccess(t *testing.T) {
 			OwnerID:         doerID,
 			ParentProjectID: &parentID,
 		}
-		_, err := s.Insert(child)
-		require.NoError(t, err)
+		insertTestProject(t, s, child)
 		require.NoError(t, s.Commit())
 		_ = s.Close()
 
@@ -713,4 +713,47 @@ func TestAuditUserDataExportRequested(t *testing.T) {
 	assert.Equal(t, audit.UserActor(42), entry.Actor)
 	assert.Equal(t, audit.UserTarget(42), entry.Target)
 	assert.Equal(t, audit.OutcomeSuccess, entry.Outcome)
+}
+
+func TestWebhookDeliveryListenerSkipsErrorReporting(t *testing.T) {
+	db.LoadAndAssertFixtures(t)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	// httptest binds to loopback, which the SSRF-safe client blocks by default.
+	previousAllowNonRoutable := config.OutgoingRequestsAllowNonRoutableIPs.GetBool()
+	config.OutgoingRequestsAllowNonRoutableIPs.Set(true)
+	previousClient := webhookClient
+	webhookClient = nil
+	t.Cleanup(func() {
+		config.OutgoingRequestsAllowNonRoutableIPs.Set(previousAllowNonRoutable)
+		webhookClient = previousClient
+	})
+
+	s := db.NewSession()
+	webhook := &Webhook{
+		TargetURL:   ts.URL,
+		Events:      []string{"task.updated"},
+		ProjectID:   1,
+		CreatedByID: 1,
+	}
+	_, err := s.Insert(webhook)
+	require.NoError(t, err)
+	require.NoError(t, s.Commit())
+	_ = s.Close()
+
+	payload, err := json.Marshal(&WebhookDeliveryEvent{
+		WebhookID: webhook.ID,
+		Payload:   &WebhookPayload{EventName: "task.updated"},
+	})
+	require.NoError(t, err)
+
+	msg := message.NewMessage("test", payload)
+	err = (&WebhookDeliveryListener{}).Handle(msg)
+
+	require.Error(t, err)
+	assert.Equal(t, "true", msg.Metadata.Get(events.MetadataSkipErrorReporting))
 }

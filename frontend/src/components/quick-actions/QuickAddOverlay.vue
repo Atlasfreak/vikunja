@@ -9,18 +9,15 @@ import {watch, onMounted} from 'vue'
 
 import QuickActions from '@/components/quick-actions/QuickActions.vue'
 import {useBaseStore} from '@/stores/base'
-import {useLabelStore} from '@/stores/labels'
-import {useProjectStore} from '@/stores/projects'
+import {ensureLabels} from '@/client/queries/labels'
+import {ensureProjects} from '@/client/queries/projects'
 
 const baseStore = useBaseStore()
-const labelStore = useLabelStore()
-const projectStore = useProjectStore()
 
 onMounted(() => {
 	baseStore.setQuickActionsActive(true)
-	// This window renders instead of ContentAuth, so nothing else loads these.
-	labelStore.loadAllLabels()
-	projectStore.loadAllProjects()
+	ensureLabels()
+	ensureProjects()
 })
 
 // When QuickActions closes (Escape, task created, etc.), tell Electron to hide the window

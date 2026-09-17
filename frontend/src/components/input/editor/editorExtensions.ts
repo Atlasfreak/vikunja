@@ -1,8 +1,9 @@
 import {nextTick, toValue, type MaybeRefOrGetter, type Ref} from 'vue'
 
 import StarterKit from '@tiptap/starter-kit'
-import {Extension, mergeAttributes, type Editor, type Extensions} from '@tiptap/core'
+import {createNodeFromContent, Extension, mergeAttributes, type Editor, type Extensions} from '@tiptap/core'
 import {Plugin, PluginKey} from '@tiptap/pm/state'
+import {Fragment} from '@tiptap/pm/model'
 import {marked} from 'marked'
 
 import Link from '@tiptap/extension-link'
@@ -19,8 +20,10 @@ import HardBreak from '@tiptap/extension-hard-break'
 import {TaskList} from '@tiptap/extension-list'
 import {TaskItemWithId} from './taskItemWithId'
 import {ListKeymapWithJoin} from './listKeymapWithJoin'
+import {DeleteSelectionBeforeEnter} from './deleteSelectionBeforeEnter'
 import {BlockquoteWithCommentId} from './blockquoteWithCommentId'
 import {TaskLink, LINK_HTML_ATTRIBUTES} from './taskLink'
+import {createClipboardParser, fillRequiredContent, repairSliceContent} from './contentRepair'
 
 import Commands from './commands'
 import suggestionSetup from './suggestion'
@@ -31,10 +34,9 @@ import {common, createLowlight} from 'lowlight'
 import type {UploadCallback} from './types'
 import type {ITask} from '@/modelTypes/ITask'
 import type {IAttachment} from '@/modelTypes/IAttachment'
-import AttachmentModel from '@/models/attachment'
-import type AttachmentService from '@/services/attachment'
+import {fetchAttachmentBlobUrl} from '@/helpers/attachments'
 
-type CacheKey = `${ITask['id']}-${IAttachment['id']}`
+type ImageNodeKey = `${ITask['id']}-${IAttachment['id']}`
 
 export interface EditorExtensionDeps {
 	t: (key: string) => string
@@ -46,8 +48,6 @@ export interface EditorExtensionDeps {
 	getEditor: () => Editor | undefined
 	uploadCallback: MaybeRefOrGetter<UploadCallback | undefined>
 	uploadAndInsertFiles: (files: File[] | FileList) => void
-	loadedAttachments: Ref<Record<string, string>>
-	attachmentService: AttachmentService
 }
 
 const CustomTableCell = TableCell.extend({
@@ -97,12 +97,7 @@ export function createEditorExtensions(deps: EditorExtensionDeps): Extensions {
 		getEditor,
 		uploadCallback,
 		uploadAndInsertFiles,
-		loadedAttachments,
-		attachmentService,
 	} = deps
-
-	// ProseMirror can call renderHTML twice per node on mount
-	const inFlightBlobFetches = new Map<CacheKey, Promise<string>>()
 
 	const CustomImage = Image.extend({
 		addAttributes() {
@@ -134,8 +129,8 @@ export function createEditorExtensions(deps: EditorExtensionDeps): Extensions {
 				const parts = imageUrl.slice(window.API_URL.length + 1).split('/')
 				const taskId = Number(parts[1])
 				const attachmentId = Number(parts[3])
-				const cacheKey: CacheKey = `${taskId}-${attachmentId}`
-				const id = 'tiptap-image-' + cacheKey
+				const nodeKey: ImageNodeKey = `${taskId}-${attachmentId}`
+				const id = 'tiptap-image-' + nodeKey
 
 				nextTick(async () => {
 
@@ -147,28 +142,11 @@ export function createEditorExtensions(deps: EditorExtensionDeps): Extensions {
 
 					if (!img || !(img instanceof HTMLImageElement)) return
 
-					if (typeof loadedAttachments.value[cacheKey] === 'undefined') {
-						let fetchPromise = inFlightBlobFetches.get(cacheKey)
-
-						if (!fetchPromise) {
-							const attachment = new AttachmentModel({taskId: taskId, id: attachmentId})
-							fetchPromise = attachmentService.getBlobUrl(attachment) as Promise<string>
-							inFlightBlobFetches.set(cacheKey, fetchPromise)
-						}
-
-						try {
-							loadedAttachments.value[cacheKey] = await fetchPromise
-						} catch {
-							return
-						} finally {
-							// clear on failure too, else the rejected promise rethrows forever
-							if (inFlightBlobFetches.get(cacheKey) === fetchPromise) {
-								inFlightBlobFetches.delete(cacheKey)
-							}
-						}
+					try {
+						img.src = await fetchAttachmentBlobUrl({taskId, id: attachmentId})
+					} catch {
+						// leave the placeholder src in place
 					}
-
-					img.src = loadedAttachments.value[cacheKey] as string
 				})
 
 				return ['img', mergeAttributes(this.options.HTMLAttributes, {
@@ -192,6 +170,9 @@ export function createEditorExtensions(deps: EditorExtensionDeps): Extensions {
 				new Plugin({
 					key: new PluginKey('pasteHandler'),
 					props: {
+						clipboardParser: createClipboardParser(this.editor.schema),
+						transformPasted: slice => repairSliceContent(slice),
+
 						handlePaste: (view, event) => {
 
 							// Handle images pasted from clipboard
@@ -224,9 +205,12 @@ export function createEditorExtensions(deps: EditorExtensionDeps): Extensions {
 								return false
 							}
 
-							const html = marked.parse(text)
+							const html = marked.parse(text) as string
+							const parsed = createNodeFromContent(html, this.editor.schema, {
+								parseOptions: {preserveWhitespace: 'full', ...this.editor.options.parseOptions},
+							})
 
-							this.editor.commands.insertContent(html)
+							this.editor.commands.insertContent(fillRequiredContent(Fragment.from(parsed)))
 							return true
 						},
 					},
@@ -248,6 +232,7 @@ export function createEditorExtensions(deps: EditorExtensionDeps): Extensions {
 			underline: false,
 		}),
 		ListKeymapWithJoin,
+		DeleteSelectionBeforeEnter,
 		BlockquoteWithCommentId,
 
 		CodeBlockLowlight.configure({

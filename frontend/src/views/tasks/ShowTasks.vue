@@ -42,7 +42,10 @@
 			v-if="!showAll"
 			class="show-tasks-options"
 		>
-			<DatepickerWithRange @update:modelValue="setDate">
+			<DatepickerWithRange
+				:model-value="{dateFrom: dateFrom ?? null, dateTo: dateTo ?? null}"
+				@update:modelValue="setDate"
+			>
 				<template #trigger="{toggle}">
 					<XButton
 						variant="primary"
@@ -90,7 +93,7 @@
 					<SingleTaskInProject
 						:show-project="true"
 						:the-task="task"
-						:can-mark-as-done="(projectStore.projects[task.projectId]?.maxPermission ?? 0) > PERMISSIONS.READ"
+						:can-mark-as-done="(projectList.projects[task.projectId]?.max_permission ?? 0) > PERMISSIONS.READ"
 						@taskUpdated="updateTasks"
 					/>
 				</li>
@@ -124,8 +127,8 @@ import LlamaCool from '@/assets/llama-cool.svg?component'
 import type {ITask} from '@/modelTypes/ITask'
 import {useAuthStore} from '@/stores/auth'
 import {useTaskStore} from '@/stores/tasks'
-import {useProjectStore} from '@/stores/projects'
-import {useLabelStore} from '@/stores/labels'
+import {useProjects} from '@/composables/useProjects'
+import {useLabels} from '@/composables/useLabels'
 import type {TaskFilterParams} from '@/services/taskCollection'
 import TaskCollectionService from '@/services/taskCollection'
 import {PERMISSIONS} from '@/constants/permissions'
@@ -151,8 +154,8 @@ const emit = defineEmits<{
 
 const authStore = useAuthStore()
 const taskStore = useTaskStore()
-const projectStore = useProjectStore()
-const labelStore = useLabelStore()
+const projectList = useProjects()
+const {getLabelById} = useLabels()
 
 const route = useRoute()
 const router = useRouter()
@@ -171,14 +174,14 @@ const filteredLabels = computed(() => {
 		return []
 	}
 	return props.labelIds
-		.map(id => labelStore.getLabelById(Number(id)))
+		.map(id => getLabelById(Number(id)))
 		.filter(label => label !== null && label !== undefined)
 })
 
 const savedFilterIgnored = computed(() => {
 	return filteredLabels.value.length > 0
 		&& filterIdUsedOnOverview.value
-		&& typeof projectStore.projects[filterIdUsedOnOverview.value] !== 'undefined'
+		&& typeof projectList.projects[filterIdUsedOnOverview.value] !== 'undefined'
 })
 
 const pageTitle = computed(() => {
@@ -280,7 +283,7 @@ async function loadPendingTasks(from: Date|string, to: Date|string, filterId: nu
 	}
 
 	let projectId = null
-	if (showAll.value && filterId && typeof projectStore.projects[filterId] !== 'undefined'
+	if (showAll.value && filterId && typeof projectList.projects[filterId] !== 'undefined'
 		&& (!props.labelIds || props.labelIds.length === 0)) {
 		projectId = filterId
 	}
@@ -304,14 +307,9 @@ function updateTasks(updatedTask: ITask) {
 	}
 }
 
-// Use watch instead of watchEffect to prevent reloading tasks when unrelated settings change.
-// watchEffect would track all reactive dependencies accessed inside loadPendingTasks,
-// which includes the entire settings object. When sidebarWidth changes, the settings
-// object is replaced, triggering the watchEffect even though filterIdUsedOnOverview
-// hasn't changed. Using watch with explicit dependencies and immediate:true gives us
-// the same behavior but only triggers when these specific values actually change.
+// Keep sidebar setting changes from reloading tasks.
 watch(
-	[() => props.dateFrom, () => props.dateTo, filterIdUsedOnOverview],
+	[() => props.dateFrom, () => props.dateTo, filterIdUsedOnOverview, () => props.showOverdue, () => props.showNulls],
 	([from, to, filterId]) => loadPendingTasks(from, to, filterId),
 	{immediate: true},
 )

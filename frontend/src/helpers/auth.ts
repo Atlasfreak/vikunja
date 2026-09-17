@@ -26,6 +26,30 @@ export const getToken = (): string | null => {
 	return savedToken
 }
 
+function getTokenPayload(token: string | null): Record<string, unknown> | null {
+	if (!token) return null
+	try {
+		const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+		return JSON.parse(atob(base64))
+	} catch {
+		return null
+	}
+}
+
+export function getTokenType(token: string | null): number | null {
+	const payload = getTokenPayload(token)
+	return typeof payload?.type === 'number' ? payload.type : null
+}
+
+export function getTokenIdentity(token: string | null): {id: number; type: number} | null {
+	const payload = getTokenPayload(token)
+	if (typeof payload?.id !== 'number' || typeof payload.type !== 'number') {
+		return null
+	}
+
+	return {id: payload.id, type: payload.type}
+}
+
 /**
  * Removes all tokens everywhere.
  */
@@ -50,6 +74,10 @@ let inFlightRefresh: Promise<void> | null = null
 // it starts and only persists its result if the epoch is unchanged, so a
 // refresh that resolves after a logout can't undo it.
 let authEpoch = 0
+
+export function getAuthSessionEpoch(): number {
+	return authEpoch
+}
 
 /**
  * Refreshes an auth token while ensuring it is updated everywhere.
@@ -164,4 +192,3 @@ async function doRefresh(persist: boolean): Promise<void> {
 		await refreshUnderLock()
 	}
 }
-

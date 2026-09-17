@@ -29,12 +29,7 @@
 						:is-done="task.done"
 						variant="small"
 					/>
-					<template v-if="task.identifier === ''">
-						#{{ task.index }}
-					</template>
-					<template v-else>
-						{{ task.identifier }}
-					</template>
+					{{ getTaskIdentifier(task) }}
 					<span
 						v-if="showTaskPosition"
 						class="tw:text-red-600 tw:ps-2"
@@ -139,11 +134,11 @@ import Labels from '@/components/tasks/partials/Labels.vue'
 import ChecklistSummary from './ChecklistSummary.vue'
 import CommentCount from './CommentCount.vue'
 
-import {getHexColor} from '@/models/task'
+import {getHexColor, getTaskIdentifier} from '@/models/task'
 import type {ITask} from '@/modelTypes/ITask'
-import type {IProject} from '@/modelTypes/IProject'
 import {SUPPORTED_IMAGE_SUFFIX} from '@/models/attachment'
-import AttachmentService, {PREVIEW_SIZE} from '@/services/attachment'
+import {PREVIEW_SIZE} from '@/services/attachment'
+import {fetchAttachmentBlobUrl} from '@/helpers/attachments'
 
 import {formatDateLong, formatDisplayDate, formatISO} from '@/helpers/time/formatDate'
 import {colorIsDark} from '@/helpers/color/colorIsDark'
@@ -151,12 +146,12 @@ import {useTaskStore} from '@/stores/tasks'
 import AssigneeList from '@/components/tasks/partials/AssigneeList.vue'
 import {playPopSound} from '@/helpers/playPop'
 import {isEditorContentEmpty} from '@/helpers/editorContentEmpty'
-import {useProjectStore} from '@/stores/projects'
+import {useProjects} from '@/composables/useProjects'
 import {TASK_REPEAT_MODES} from '@/types/IRepeatMode'
 
 const props = withDefaults(defineProps<{
 	task: ITask,
-	projectId: IProject['id'],
+	projectId: number,
 	loading?: boolean,
 }>(), {
 	loading: false,
@@ -172,14 +167,14 @@ const loadingInternal = ref(false)
 
 const color = computed(() => getHexColor(props.task.hexColor))
 
-const projectStore = useProjectStore()
+const projectList = useProjects()
 
 const projectTitle = computed(() => {
 	if (props.projectId === props.task.projectId) {
 		return
 	}
 	
-	const project = projectStore.projects[props.task.projectId]
+	const project = projectList.projects[props.task.projectId]
 	return project?.title
 })
 
@@ -238,8 +233,7 @@ async function maybeDownloadCoverImage() {
 		return
 	}
 
-	const attachmentService = new AttachmentService()
-	coverImageBlobUrl.value = await attachmentService.getBlobUrl(attachment, PREVIEW_SIZE.LG)
+	coverImageBlobUrl.value = await fetchAttachmentBlobUrl(attachment, PREVIEW_SIZE.LG)
 }
 
 watch(

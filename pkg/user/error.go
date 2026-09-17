@@ -346,6 +346,25 @@ func (err ErrTOTPNotEnabled) HTTPError() web.HTTPError {
 	}
 }
 
+// ErrTOTPQrCodeNotAvailable represents a "TOTPQrCodeNotAvailable" kind of error.
+type ErrTOTPQrCodeNotAvailable struct{}
+
+func (err ErrTOTPQrCodeNotAvailable) Error() string {
+	return "The totp qrcode is not available because totp is already enabled for this user"
+}
+
+// ErrCodeTOTPQrCodeNotAvailable holds the unique world-error code of this error
+const ErrCodeTOTPQrCodeNotAvailable = 1037
+
+// HTTPError holds the http error description
+func (err ErrTOTPQrCodeNotAvailable) HTTPError() web.HTTPError {
+	return web.HTTPError{
+		HTTPCode: http.StatusForbidden,
+		Code:     ErrCodeTOTPQrCodeNotAvailable,
+		Message:  "The totp qrcode is not available because totp is already enabled for this user.",
+	}
+}
+
 // ErrInvalidTOTPPasscode represents a "InvalidTOTPPasscode" kind of error.
 type ErrInvalidTOTPPasscode struct {
 	Passcode string
@@ -388,7 +407,7 @@ func (err ErrTOTPPasscodeUsed) Error() string {
 }
 
 // ErrCodeTOTPPasscodeUsed holds the unique world-error code of this error
-const ErrCodeTOTPPasscodeUsed = 1025
+const ErrCodeTOTPPasscodeUsed = 1039
 
 // HTTPError holds the http error description
 func (err ErrTOTPPasscodeUsed) HTTPError() web.HTTPError {
@@ -466,8 +485,8 @@ func (err *ErrOpenIDCustomScopeMalformed) Error() string {
 	return "Custom Scope malformed"
 }
 
-// ErrCodeNoOpenIDEmailProvided holds the unique world-error code of this error
-const ErrCodeOpenIDCustomScopeMalformed = 1022
+// ErrCodeOpenIDCustomScopeMalformed holds the unique world-error code of this error
+const ErrCodeOpenIDCustomScopeMalformed = 1038
 
 // HTTPError holds the http error description
 func (err *ErrOpenIDCustomScopeMalformed) HTTPError() web.HTTPError {
@@ -521,7 +540,7 @@ func (err *ErrAccountLocked) Error() string {
 }
 
 // ErrCodeAccountLocked holds the unique world-error code of this error
-const ErrCodeAccountLocked = 1026
+const ErrCodeAccountLocked = 1040
 
 // HTTPError holds the http error description
 func (err *ErrAccountLocked) HTTPError() web.HTTPError {

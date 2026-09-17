@@ -11,7 +11,7 @@
 					v-model="sortByParam"
 				/>
 				<FilterPopup
-					v-if="!isSavedFilter(project)"
+					v-if="!isSavedFilterProject(project)"
 					v-model="params"
 					:view-id="viewId"
 					:project-id="projectId"
@@ -31,7 +31,7 @@
 					class="has-overflow"
 				>
 					<AddTask
-						v-if="!project?.isArchived && canWrite"
+						v-if="!project?.is_archived && canWrite"
 						ref="addTaskRef"
 						class="list-view__add-task d-print-none"
 						@tasksAdded="updateTaskList"
@@ -114,24 +114,23 @@ import SortPopup from '@/components/project/partials/SortPopup.vue'
 
 import {useTaskList} from '@/composables/useTaskList'
 import {useTaskDragToProject} from '@/composables/useTaskDragToProject'
+import {useCurrentProject} from '@/composables/useCurrentProject'
 import {shouldShowTaskInListView} from '@/composables/useTaskListFiltering'
 import {PERMISSIONS as Permissions} from '@/constants/permissions'
 import {calculateItemPosition} from '@/helpers/calculateItemPosition'
 import type {ITask} from '@/modelTypes/ITask'
-import {isSavedFilter, useSavedFilter} from '@/services/savedFilter'
+import {isSavedFilterProject} from '@/client/queries/projects'
 
 import {useBaseStore} from '@/stores/base'
 import {useTaskStore} from '@/stores/tasks'
 
-import type {IProject} from '@/modelTypes/IProject'
-import type {IProjectView} from '@/modelTypes/IProjectView'
 import TaskPositionService from '@/services/taskPosition'
 import TaskPositionModel from '@/models/taskPosition'
 
 const props = defineProps<{
-        isLoadingProject: boolean,
-        projectId: IProject['id'],
-        viewId: IProjectView['id'],
+	isLoadingProject: boolean,
+	projectId: number,
+	viewId: number,
 }>()
 
 const projectId = toRef(props, 'projectId')
@@ -161,9 +160,6 @@ const {
 
 const taskPositionService = ref(new TaskPositionService())
 
-// Saved filter composable for accessing filter data
-const _savedFilter = useSavedFilter(() => isSavedFilter({id: projectId.value}) ? projectId.value : undefined).filter
-
 const tasks = ref<ITask[]>([])
 watch(
 	allTasks,
@@ -177,20 +173,22 @@ const isPositionSorting = computed(() => 'position' in sortByParam.value)
 const baseStore = useBaseStore()
 const taskStore = useTaskStore()
 const {handleTaskDropToProject} = useTaskDragToProject()
-const project = computed(() => baseStore.currentProject)
+const {currentProject: project} = useCurrentProject()
 
 const canWrite = computed(() => {
-	return project.value?.maxPermission > Permissions.READ && project.value?.id > 0
+	return typeof project.value?.max_permission === 'number' &&
+		project.value.max_permission > Permissions.READ &&
+		project.value.id > 0
 })
 
-const isPseudoProject = computed(() => (project.value && isSavedFilter(project.value)) || project.value?.id === -1)
+const isPseudoProject = computed(() => isSavedFilterProject(project.value) || project.value?.id === -1)
 
 onMounted(async () => {
 	await nextTick()
 	ctaVisible.value = true
 })
 
-const canDragTasks = computed(() => canWrite.value || isSavedFilter(project.value))
+const canDragTasks = computed(() => canWrite.value || isSavedFilterProject(project.value))
 
 const isTouchDevice = ref(false)
 if (typeof window !== 'undefined') {
@@ -243,7 +241,7 @@ function handleDragStart(e: { item: HTMLElement }) {
 	}
 }
 
-async function saveTaskPosition(e: { originalEvent?: MouseEvent, to: HTMLElement, from: HTMLElement, newIndex: number }) {
+async function saveTaskPosition(e: { originalEvent?: MouseEvent, to: HTMLElement, from: HTMLElement, item: HTMLElement, newIndex: number }) {
 	drag.value = false
 
 	// Check if dropped on a sidebar project
@@ -260,21 +258,28 @@ async function saveTaskPosition(e: { originalEvent?: MouseEvent, to: HTMLElement
 		return
 	}
 
-	const task = tasks.value[e.newIndex]
-	const taskBefore = tasks.value[e.newIndex - 1] ?? null
-	const taskAfter = tasks.value[e.newIndex + 1] ?? null
+	// e.newIndex is a DOM index: it counts elements still leaving the transition group, so it can
+	// point past the last task. The list is already reordered here, so resolve the task by its id.
+	const movedTaskId = parseInt(e.item.dataset.taskId ?? '', 10)
+	const newIndex = tasks.value.findIndex(t => t.id === movedTaskId)
+
+	if (newIndex === -1) {
+		return
+	}
+
+	const taskBefore = tasks.value[newIndex - 1] ?? null
+	const taskAfter = tasks.value[newIndex + 1] ?? null
 
 	const position = calculateItemPosition(taskBefore !== null ? taskBefore.position : null, taskAfter !== null ? taskAfter.position : null)
 
 	await taskPositionService.value.update(new TaskPositionModel({
 		position,
 		projectViewId: props.viewId,
-		taskId: task.id,
+		taskId: movedTaskId,
 	}))
-	tasks.value[e.newIndex] = {
-		...task,
-		position,
-	}
+	tasks.value = tasks.value.map(t => t.id === movedTaskId
+		? {...t, position}
+		: t)
 }
 
 const taskRefs = ref<(InstanceType<typeof SingleTaskInProject> | null)[]>([])
@@ -363,8 +368,6 @@ onBeforeUnmount(() => {
 	gap: .5rem;
 
 	:deep(.popup) {
-		inset-block-start: 3rem;
-		inset-inline-end: 0;
 		max-inline-size: 300px;
 	}
 }

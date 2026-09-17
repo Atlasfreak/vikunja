@@ -18,6 +18,7 @@ package models
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -216,6 +217,38 @@ func (err ErrInvalidModel) HTTPError() web.HTTPError {
 		Code:     ErrCodeInvalidModel,
 		Message:  err.Error(),
 	}
+}
+
+type ErrInviteLinkInvalid struct{}
+
+func (err ErrInviteLinkInvalid) Error() string { return "This invite link is invalid or expired." }
+
+const ErrCodeInviteLinkInvalid = 2005
+
+func (err ErrInviteLinkInvalid) HTTPError() web.HTTPError {
+	return web.HTTPError{HTTPCode: http.StatusNotFound, Code: ErrCodeInviteLinkInvalid, Message: err.Error()}
+}
+
+type ErrInviteLinkDoesNotExist struct{}
+
+func (err ErrInviteLinkDoesNotExist) Error() string { return "This invite link does not exist." }
+
+const ErrCodeInviteLinkDoesNotExist = 2006
+
+func (err ErrInviteLinkDoesNotExist) HTTPError() web.HTTPError {
+	return web.HTTPError{HTTPCode: http.StatusNotFound, Code: ErrCodeInviteLinkDoesNotExist, Message: err.Error()}
+}
+
+type ErrInviteLinkExternalTeam struct{}
+
+func (err ErrInviteLinkExternalTeam) Error() string {
+	return "Externally managed teams cannot be attached to an invite link."
+}
+
+const ErrCodeInviteLinkExternalTeam = 2007
+
+func (err ErrInviteLinkExternalTeam) HTTPError() web.HTTPError {
+	return web.HTTPError{HTTPCode: http.StatusBadRequest, Code: ErrCodeInviteLinkExternalTeam, Message: err.Error()}
 }
 
 // ===========
@@ -1309,10 +1342,10 @@ type ErrInvalidFilterExpression struct {
 	ExpressionError error
 }
 
-// IsErrInvalidFilterExpression checks if an error is ErrInvalidFilterExpression.
+// Parse paths return pointer errors.
 func IsErrInvalidFilterExpression(err error) bool {
-	_, ok := err.(ErrInvalidFilterExpression)
-	return ok
+	var e *ErrInvalidFilterExpression
+	return errors.As(err, &e)
 }
 
 func (err ErrInvalidFilterExpression) Error() string {
@@ -1328,6 +1361,33 @@ func (err ErrInvalidFilterExpression) HTTPError() web.HTTPError {
 		HTTPCode: http.StatusBadRequest,
 		Code:     ErrCodeInvalidFilterExpression,
 		Message:  fmt.Sprintf("The filter expression '%s' is invalid: %v", err.Expression, err.ExpressionError),
+	}
+}
+
+// ErrFilterTooComplex omits the attacker-controlled expression (GHSA-xxc3-xpmc-vmvr).
+type ErrFilterTooComplex struct {
+	Reason string
+}
+
+// IsErrFilterTooComplex checks if an error is a ErrFilterTooComplex.
+func IsErrFilterTooComplex(err error) bool {
+	var e *ErrFilterTooComplex
+	return errors.As(err, &e)
+}
+
+func (err *ErrFilterTooComplex) Error() string {
+	return "The filter expression is too complex: " + err.Reason
+}
+
+// ErrCodeFilterTooComplex holds the unique world-error code of this error
+const ErrCodeFilterTooComplex = 4033
+
+// HTTPError holds the http error description
+func (err *ErrFilterTooComplex) HTTPError() web.HTTPError {
+	return web.HTTPError{
+		HTTPCode: http.StatusBadRequest,
+		Code:     ErrCodeFilterTooComplex,
+		Message:  "The filter expression is too complex: " + err.Reason,
 	}
 }
 

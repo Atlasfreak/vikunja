@@ -68,6 +68,7 @@ import (
 	backgroundHandler "code.vikunja.io/api/pkg/modules/background/handler"
 	"code.vikunja.io/api/pkg/modules/background/unsplash"
 	"code.vikunja.io/api/pkg/modules/background/upload"
+	mcpmodule "code.vikunja.io/api/pkg/modules/mcp"
 	"code.vikunja.io/api/pkg/modules/migration"
 	csvmigrator "code.vikunja.io/api/pkg/modules/migration/csv"
 	migrationHandler "code.vikunja.io/api/pkg/modules/migration/handler"
@@ -121,6 +122,14 @@ func matchCORSOrigin(origin string, allowedOrigins []string) (string, bool, erro
 	return "", false, nil
 }
 
+func corsOriginAllowed(origin string) bool {
+	if !config.CorsEnable.GetBool() {
+		return false
+	}
+	_, ok, err := matchCORSOrigin(origin, config.CorsOrigins.GetStringSlice())
+	return ok && err == nil
+}
+
 // NewEcho registers a new Echo instance
 func NewEcho() *echo.Echo {
 	// Configure Echo with a router that unescapes path parameters.
@@ -140,7 +149,7 @@ func NewEcho() *echo.Echo {
 
 	e.IPExtractor = newIPExtractor(config.ServiceIPExtractionMethod.GetString(), config.ServiceTrustedProxies.GetString())
 
-	e.Logger = log.NewEchoLogger(config.LogEnabled.GetBool(), config.LogHTTP.GetString(), config.LogFormat.GetString())
+	e.Logger = log.NewEchoLogger(config.LogEnabled.GetBool(), config.LogHTTP.GetString(), config.LogHTTPLevel.GetString(), config.LogFormat.GetString())
 
 	// First middleware in the chain so every request has an ID — reuses the
 	// X-Request-Id header from a proxy or generates one — and everything
@@ -149,7 +158,7 @@ func NewEcho() *echo.Echo {
 
 	// Logger
 	if config.LogEnabled.GetBool() && config.LogHTTP.GetString() != "off" {
-		httpLogger := log.NewHTTPLogger(config.LogEnabled.GetBool(), config.LogHTTP.GetString(), config.LogFormat.GetString())
+		httpLogger := log.NewHTTPLogger(config.LogEnabled.GetBool(), config.LogHTTP.GetString(), config.LogHTTPLevel.GetString(), config.LogFormat.GetString())
 		e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
 			LogStatus:    true,
 			LogURI:       true,
@@ -159,26 +168,18 @@ func NewEcho() *echo.Echo {
 			LogUserAgent: true,
 			HandleError:  true,
 			LogValuesFunc: func(_ *echo.Context, v middleware.RequestLoggerValues) error {
-				if v.Error == nil {
-					httpLogger.LogAttrs(context.Background(), slog.LevelInfo, "",
-						slog.String("remote_ip", v.RemoteIP),
-						slog.String("method", v.Method),
-						slog.String("uri", v.URI),
-						slog.Int("status", v.Status),
-						slog.Duration("latency", v.Latency),
-						slog.String("user_agent", v.UserAgent),
-					)
-				} else {
-					httpLogger.LogAttrs(context.Background(), slog.LevelError, "",
-						slog.String("remote_ip", v.RemoteIP),
-						slog.String("method", v.Method),
-						slog.String("uri", v.URI),
-						slog.Int("status", v.Status),
-						slog.Duration("latency", v.Latency),
-						slog.String("user_agent", v.UserAgent),
-						slog.String("err", v.Error.Error()),
-					)
+				attrs := []slog.Attr{
+					slog.String("remote_ip", v.RemoteIP),
+					slog.String("method", v.Method),
+					slog.String("uri", v.URI),
+					slog.Int("status", v.Status),
+					slog.Duration("latency", v.Latency),
+					slog.String("user_agent", v.UserAgent),
 				}
+				if v.Error != nil {
+					attrs = append(attrs, slog.String("err", v.Error.Error()))
+				}
+				httpLogger.LogAttrs(context.Background(), httpLogLevel(v.Status), "", attrs...)
 				return nil
 			},
 		}))
@@ -234,20 +235,31 @@ func setupSentry(e *echo.Echo) {
 // RegisterRoutes registers all routes for the application
 func RegisterRoutes(e *echo.Echo) {
 
+	// One instance keeps every BasicAuth route on the same failure budget.
+	noAuthRateLimit := unauthRateLimit()
+	refreshRateLimit := tokenRefreshRateLimit()
+	basicAuthRateLimit := basicAuthRateLimit()
+
 	if config.ServiceEnableCaldav.GetBool() {
 		// Caldav routes
 		wkg := e.Group("/.well-known")
+		// Reserve the failure budget before bcrypt runs.
+		wkg.Use(basicAuthRateLimit)
 		wkg.Use(middleware.BasicAuth(caldav.BasicAuth))
 		wkg.Any("/caldav", caldav.PrincipalHandler)
 		wkg.Any("/caldav/", caldav.PrincipalHandler)
 		c := e.Group("/dav")
+		c.Use(basicAuthRateLimit)
 		registerCalDavRoutes(c)
 	}
 
 	// Feeds routes (Atom feed for user notifications)
 	f := e.Group("/feeds")
+	f.Use(basicAuthRateLimit)
 	f.Use(middleware.BasicAuth(feeds.BasicAuth))
 	f.GET("/notifications.atom", feeds.NotificationsAtomFeed)
+
+	e.GET("/.well-known/change-password", ChangePasswordRedirect)
 
 	// healthcheck
 	e.GET("/health", HealthcheckHandler)
@@ -280,17 +292,15 @@ func RegisterRoutes(e *echo.Echo) {
 		}))
 	}
 
-	// Shared across every use site: building one per version or per route group
-	// would give each its own counters, multiplying the effective per-IP budget.
-	noAuthRateLimit := unauthRateLimit()
-	refreshRateLimit := tokenRefreshRateLimit()
-
 	// API Routes
 	a := e.Group("/api/v1")
 	registerAPIRoutes(a, noAuthRateLimit, refreshRateLimit)
+	setupPprof(e)
 
 	// /api/v2 — Huma-backed API, scaffolded alongside /api/v1.
-	a2 := e.Group("/api/v2")
+	a2 := e.Group(apiv2.GroupPrefix)
+	// Share the BasicAuth failure budget with CalDAV and feeds.
+	a2.Use(pathScoped(func(p string) bool { return p == "/api/v2/notifications.atom" }, basicAuthRateLimit))
 	registerAPIRoutesV2(e, a2, noAuthRateLimit, refreshRateLimit)
 
 	// Collect routes for API token permissions
@@ -326,6 +336,7 @@ var unauthenticatedAPIPaths = map[string]bool{
 	"/api/v2/info":                      true,
 
 	"/api/v2/register":                       true,
+	"/api/v2/invite-links/check":             true,
 	"/api/v2/user/password/token":            true,
 	"/api/v2/user/password/reset":            true,
 	"/api/v2/user/confirm":                   true,
@@ -418,6 +429,7 @@ func unauthenticatedPathSet(paths ...string) pathSet {
 // The v2 counterparts of v1's unauthenticated route group - credential
 // endpoints only, never the docs/info/health ones.
 var v2CredentialPaths = unauthenticatedPathSet(
+	"/api/v2/invite-links/check",
 	"/api/v2/register",
 	"/api/v2/user/password/token",
 	"/api/v2/user/password/reset",
@@ -439,9 +451,12 @@ const v2AdminPathPrefix = "/api/v2/admin"
 func gateV2AdminRoutes() echo.MiddlewareFunc {
 	feature := RequireFeature(license.FeatureAdminPanel)
 	admin := RequireInstanceAdmin()
+	invites := pathScoped(func(p string) bool {
+		return p == v2AdminPathPrefix+"/teams" || p == v2AdminPathPrefix+"/invite-links" || strings.HasPrefix(p, v2AdminPathPrefix+"/invite-links/")
+	}, RequireFeature(license.FeatureUserInvites))
 	return pathScoped(
 		func(p string) bool { return strings.HasPrefix(p, v2AdminPathPrefix) },
-		func(next echo.HandlerFunc) echo.HandlerFunc { return feature(admin(next)) },
+		func(next echo.HandlerFunc) echo.HandlerFunc { return feature(admin(invites(next))) },
 	)
 }
 
@@ -476,6 +491,12 @@ func registerAPIRoutesV2(e *echo.Echo, a *echo.Group, noAuthRateLimit, refreshRa
 
 	// Resources self-register via init(); RegisterAll runs them all + AutoPatch.
 	apiv2.RegisterAll(api)
+	m, err := mcpmodule.New(api, corsOriginAllowed)
+	if err != nil {
+		panic(err)
+	}
+	m.Register(a)
+	apiv2.RegisterMCPInfo(api, m.ConnectionInfo)
 }
 
 func registerAPIRoutes(a *echo.Group, noAuthRateLimit, refreshRateLimit echo.MiddlewareFunc) {
@@ -1059,4 +1080,17 @@ func registerCalDavRoutes(c *echo.Group) {
 	c.Any("/projects/:project", caldav.ProjectHandler)
 	c.Any("/projects/:project/", caldav.ProjectHandler)
 	c.Any("/projects/:project/:task", caldav.TaskHandler) // Mostly used for editing
+}
+
+// Level by status so log.httplevel can filter successful requests out
+// while keeping failed ones.
+func httpLogLevel(status int) slog.Level {
+	switch {
+	case status >= 500:
+		return slog.LevelError
+	case status >= 400:
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
+	}
 }

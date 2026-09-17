@@ -68,6 +68,7 @@
 										{{ task.differentProject }} >
 									</span>
 								</span>
+								<span class="task-identifier">{{ getTaskIdentifier(task) }}</span>
 								{{ task.title }}
 							</span>
 							<span
@@ -145,6 +146,7 @@
 									{{ task.differentProject }} >
 								</span>
 							</span>
+							<span class="task-identifier">{{ getTaskIdentifier(task) }}</span>
 							{{ task.title }}
 						</RouterLink>
 					</div>
@@ -194,7 +196,7 @@ import {useI18n} from 'vue-i18n'
 import {useRoute} from 'vue-router'
 
 import TaskService from '@/services/task'
-import TaskModel from '@/models/task'
+import TaskModel, {getTaskIdentifier} from '@/models/task'
 import type {ITask} from '@/modelTypes/ITask'
 import type {ITaskRelation} from '@/modelTypes/ITaskRelation'
 import {RELATION_KINDS, type IRelationKind} from '@/types/IRelationKind'
@@ -210,7 +212,7 @@ import QuickAddMagic from '@/components/tasks/partials/QuickAddMagic.vue'
 
 import {error, success} from '@/message'
 import {useTaskStore} from '@/stores/tasks'
-import {useProjectStore} from '@/stores/projects'
+import {useProjects} from '@/composables/useProjects'
 import {useAuthStore} from '@/stores/auth'
 import {playPopSound} from '@/helpers/playPop'
 
@@ -226,7 +228,7 @@ const props = withDefaults(defineProps<{
 })
 
 const taskStore = useTaskStore()
-const projectStore = useProjectStore()
+const projectList = useProjects()
 const authStore = useAuthStore()
 const route = useRoute()
 const {t} = useI18n({useScope: 'global'})
@@ -269,7 +271,7 @@ async function findTasks(newQuery: string) {
 function mapRelatedTasks(tasks: ITask[]) {
 	return tasks.map(task => {
 		// by doing this here once we can save a lot of duplicate calls in the template
-		const project = projectStore.projects[task.projectId]
+		const project = projectList.projects[task.projectId]
 
 		return {
 			...task,
@@ -278,6 +280,23 @@ function mapRelatedTasks(tasks: ITask[]) {
 					task.projectId !== props.projectId &&
 					project?.title) || null,
 		}
+	})
+}
+
+function sortTasksForRelationSearch(tasks: ITask[]) {
+	return [...tasks].sort((a, b) => {
+		if (a.done !== b.done) {
+			return a.done ? 1 : -1
+		}
+
+		const aIsCurrentProject = a.projectId === props.projectId
+		const bIsCurrentProject = b.projectId === props.projectId
+
+		if (aIsCurrentProject === bIsCurrentProject) {
+			return 0
+		}
+
+		return aIsCurrentProject ? -1 : 1
 	})
 }
 
@@ -302,7 +321,7 @@ const mappedRelatedTasks = computed(() => Object.entries(relatedTasks.value).map
 		kind: kind as IRelationKind,
 	}),
 ))
-const mappedFoundTasks = computed(() => mapRelatedTasks(foundTasks.value.filter(t => t.id !== props.taskId)))
+const mappedFoundTasks = computed(() => mapRelatedTasks(sortTasksForRelationSearch(foundTasks.value.filter(t => t.id !== props.taskId))))
 
 const taskRelationService = shallowReactive(new TaskRelationService())
 const saved = ref(false)
@@ -412,6 +431,11 @@ async function toggleTaskDone(task: ITask) {
 .different-project {
 	color: var(--grey-500);
 	inline-size: auto;
+}
+
+.task-identifier {
+	color: var(--grey-500);
+	margin-inline-end: .35rem;
 }
 
 .title {

@@ -18,14 +18,17 @@ package models
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"code.vikunja.io/api/pkg/config"
+	"code.vikunja.io/api/pkg/db"
 	"code.vikunja.io/api/pkg/events"
 	"code.vikunja.io/api/pkg/files"
 	"code.vikunja.io/api/pkg/log"
@@ -39,6 +42,7 @@ import (
 	"github.com/jinzhu/copier"
 	"xorm.io/builder"
 	"xorm.io/xorm"
+	"xorm.io/xorm/schemas"
 )
 
 type TaskRepeatMode int
@@ -78,16 +82,17 @@ type Task struct {
 	Title string `xorm:"TEXT not null" json:"title" valid:"minstringlength(1)" minLength:"1" doc:"The task title. This is what you'll see in the project."`
 	// The task description.
 	Description string `xorm:"longtext null" json:"description"`
+	// The project this task belongs to.
+	// Must precede done/due_date: xorm orders composite index columns by struct field order.
+	ProjectID int64 `xorm:"bigint INDEX not null unique(tasks_project_index) index(project_done_due_date)" json:"project_id" param:"project" doc:"The id of the project this task belongs to. On create it is taken from the URL; on update, setting it to a different project moves the task (requires write access to the target project)."`
 	// Whether a task is done or not.
-	Done bool `xorm:"INDEX null index(done_due_date)" json:"done"`
+	Done bool `xorm:"INDEX null index(project_done_due_date)" json:"done"`
 	// The time when a task was marked as done. This field is system-controlled and cannot be set via API.
 	DoneAt time.Time `xorm:"INDEX null 'done_at'" json:"done_at" readOnly:"true" doc:"When the task was marked as done. Set by the server; ignored on write."`
 	// The time when the task is due.
-	DueDate time.Time `xorm:"DATETIME INDEX null index(done_due_date) 'due_date'" json:"due_date"`
+	DueDate time.Time `xorm:"DATETIME INDEX null index(project_done_due_date) 'due_date'" json:"due_date"`
 	// An array of reminders that are associated with this task.
 	Reminders []*TaskReminder `xorm:"-" json:"reminders"`
-	// The project this task belongs to.
-	ProjectID int64 `xorm:"bigint INDEX not null unique(tasks_project_index)" json:"project_id" param:"project" doc:"The id of the project this task belongs to. On create it is taken from the URL; on update, setting it to a different project moves the task (requires write access to the target project)."`
 	// An amount in seconds this task repeats itself. If this is set, when marking the task as done, it will mark itself as "undone" and then increase all remindes and the due date by its amount.
 	RepeatAfter int64 `xorm:"bigint INDEX null" json:"repeat_after" valid:"range(0|9223372036854775807)" doc:"The interval in seconds this task repeats. When set, marking the task done re-opens it and bumps its reminders and due date by this amount."`
 	// Can have three possible values which will trigger when the task is marked as done: 0 = repeats after the amount specified in repeat_after, 1 = repeats all dates each months (ignoring repeat_after), 3 = repeats from the current date rather than the last set date.
@@ -377,13 +382,25 @@ func getTasksForProjects(s *xorm.Session, projects []*Project, a web.Auth, opts 
 	return tasks, resultCount, totalItems, err
 }
 
+func taskMemoKey(id int64) string { return "task-" + strconv.FormatInt(id, 10) }
+
+// lockingSession adds a row lock to the next read. xorm rejects FOR UPDATE on SQLite, which serializes writers anyway.
+func lockingSession(s *xorm.Session) *xorm.Session {
+	if dbType := db.Type(); dbType == schemas.MYSQL || dbType == schemas.POSTGRES {
+		return s.ForUpdate()
+	}
+	return s
+}
+
 // GetTaskByIDSimple returns a raw task without extra data by the task ID
 func GetTaskByIDSimple(s *xorm.Session, taskID int64) (task Task, err error) {
 	if taskID < 1 {
 		return Task{}, ErrTaskDoesNotExist{taskID}
 	}
 
-	return GetTaskSimple(s, &Task{ID: taskID})
+	return db.Remember(s, taskMemoKey(taskID), func() (Task, error) {
+		return GetTaskSimple(s, &Task{ID: taskID})
+	})
 }
 
 // GetTaskByProjectAndIndex returns a task by its per-project index.
@@ -881,65 +898,52 @@ func calculateDefaultPosition(entityID int64, position float64) float64 {
 	return position
 }
 
-func calculateNextTaskIndex(s *xorm.Session, projectID int64) (nextIndex int64, err error) {
-	latestTask := &Task{}
-	// Unscoped so an index is never reused while a soft-deleted task still holds it
-	_, err = s.
-		Unscoped().
-		Where("project_id = ?", projectID).
-		OrderBy("`index` desc").
-		Get(latestTask)
-	if err != nil {
-		return 0, err
+func setNewTaskIndexes(s *xorm.Session, projectID int64, tasks []*Task) error {
+	if len(tasks) == 0 {
+		return nil
 	}
 
-	return latestTask.Index + 1, nil
-}
-
-// setNewTaskIndexes keeps preset indexes when free (the migration importer relies on them) and assigns the next free one otherwise.
-func setNewTaskIndexes(s *xorm.Session, projectID int64, tasks []*Task) (err error) {
-	nextIndex, err := calculateNextTaskIndex(s, projectID)
+	reserved := int64(len(tasks))
+	lastIndex, err := reserveTaskIndexes(s, projectID, reserved)
 	if err != nil {
 		return err
 	}
+	previous := lastIndex - reserved
 
-	taken := make(map[int64]bool)
-	presets := make([]int64, 0, len(tasks))
+	// Presets above the old high water mark cannot collide with anything, everything else gets a fresh index.
+	used := make(map[int64]bool, len(tasks))
+	highest := lastIndex
 	for _, t := range tasks {
-		if t.Index != 0 {
-			presets = append(presets, t.Index)
-		}
-	}
-	if len(presets) > 0 {
-		existing := []*Task{}
-		// Unscoped so an index is never reused while a soft-deleted task still holds it
-		err = s.Unscoped().
-			Cols("index").
-			Where("project_id = ?", projectID).
-			In("`index`", presets).
-			Find(&existing)
-		if err != nil {
-			return err
-		}
-		for _, t := range existing {
-			taken[t.Index] = true
-		}
-	}
-
-	for _, t := range tasks {
-		if t.Index != 0 && !taken[t.Index] {
-			taken[t.Index] = true
+		// Bounding imported presets keeps the counter far away from int64 overflow.
+		if t.Index <= previous || t.Index > math.MaxInt32 || used[t.Index] {
+			t.Index = 0
 			continue
 		}
-		for taken[nextIndex] {
-			nextIndex++
+		used[t.Index] = true
+		if t.Index > highest {
+			highest = t.Index
 		}
-		t.Index = nextIndex
-		taken[nextIndex] = true
-		nextIndex++
 	}
 
-	return nil
+	next := previous
+	for _, t := range tasks {
+		if t.Index != 0 {
+			continue
+		}
+		next++
+		for used[next] {
+			next++
+		}
+		t.Index = next
+	}
+
+	if highest > lastIndex {
+		_, err = s.ID(projectID).
+			Cols("last_index").
+			Update(&ProjectTaskCounter{LastIndex: highest})
+	}
+
+	return err
 }
 
 // Create is the implementation to create a project task
@@ -961,8 +965,16 @@ func (t *Task) Create(s *xorm.Session, a web.Auth) (err error) {
 }
 
 func createTask(s *xorm.Session, t *Task, a web.Auth, updateAssignees bool, setBucket bool) (err error) {
-	err = createTasks(s, t.ProjectID, []*Task{t}, a, updateAssignees, setBucket)
-	// Single-create callers expect the raw error type, not the batch wrapper.
+	return unwrapBulkCreateError(createTasks(s, t.ProjectID, []*Task{t}, a, updateAssignees, setBucket, false))
+}
+
+// CreateTasksForImport preserves preset indexes across the whole imported batch.
+func CreateTasksForImport(s *xorm.Session, projectID int64, tasks []*Task, a web.Auth) error {
+	return unwrapBulkCreateError(createTasks(s, projectID, tasks, a, true, true, true))
+}
+
+// unwrapBulkCreateError returns the raw error type callers of a single logical create expect, not the batch wrapper.
+func unwrapBulkCreateError(err error) error {
 	var berr ErrInvalidTaskInBulkCreation
 	if errors.As(err, &berr) {
 		return berr.Err
@@ -1030,7 +1042,7 @@ func resolveProvidedBuckets(s *xorm.Session, a web.Auth, projectID int64, tasks 
 }
 
 // createTasks inserts row by row because multi-row inserts don't reliably return autoincrement ids on all supported databases.
-func createTasks(s *xorm.Session, projectID int64, tasks []*Task, a web.Auth, updateAssignees bool, setBucket bool) (err error) {
+func createTasks(s *xorm.Session, projectID int64, tasks []*Task, a web.Auth, updateAssignees bool, setBucket, preserveIndexes bool) (err error) {
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -1043,6 +1055,9 @@ func createTasks(s *xorm.Session, projectID int64, tasks []*Task, a web.Auth, up
 
 		t.ProjectID = projectID
 		t.ID = 0
+		if !preserveIndexes {
+			t.Index = 0
+		}
 	}
 
 	// Check if the project exists
@@ -1082,7 +1097,12 @@ func createTasks(s *xorm.Session, projectID int64, tasks []*Task, a web.Auth, up
 		return err
 	}
 
-	positions, taskBuckets, err := setTasksInBucketInViews(s, tasks, a, setBucket, taskProvidedBucket)
+	views, err := lockProjectViewsForPositionUpdate(s, projectID)
+	if err != nil {
+		return err
+	}
+
+	positions, taskBuckets, err := setTasksInBucketInViews(s, views, tasks, a, setBucket, taskProvidedBucket)
 	if err != nil {
 		return err
 	}
@@ -1106,8 +1126,10 @@ func createTasks(s *xorm.Session, projectID int64, tasks []*Task, a web.Auth, up
 		}
 	}
 
-	if len(taskBuckets) > 0 {
-		_, err = s.Insert(&taskBuckets)
+	// Keep statements well below the parameter limits of all supported databases.
+	const taskBucketBatchSize = 100
+	for chunk := range slices.Chunk(taskBuckets, taskBucketBatchSize) {
+		_, err = s.Insert(chunk)
 		if err != nil {
 			return
 		}
@@ -1160,16 +1182,12 @@ func createTasks(s *xorm.Session, projectID int64, tasks []*Task, a web.Auth, up
 	return
 }
 
-func setTasksInBucketInViews(s *xorm.Session, tasks []*Task, a web.Auth, setBucket bool, providedBuckets map[int64]*Bucket) ([]*TaskPosition, []*TaskBucket, error) {
+func setTasksInBucketInViews(s *xorm.Session, views []*ProjectView, tasks []*Task, a web.Auth, setBucket bool, providedBuckets map[int64]*Bucket) ([]*TaskPosition, []*TaskBucket, error) {
 	if len(tasks) == 0 {
 		return nil, nil, nil
 	}
 
-	views, err := getViewsForProject(s, tasks[0].ProjectID)
-	if err != nil {
-		return nil, nil, err
-	}
-
+	var err error
 	taskBuckets := []*TaskBucket{}
 
 	defaultBucketIDs := make(map[int64]int64)
@@ -1273,8 +1291,8 @@ func (t *Task) Update(s *xorm.Session, a web.Auth) (err error) {
 //nolint:gocyclo
 func (t *Task) updateSingleTask(s *xorm.Session, a web.Auth, fields []string) (err error) {
 
-	// Check if the task exists and get the old values
-	ot, err := GetTaskByIDSimple(s, t.ID)
+	// Row lock so concurrent movers serialize; bypasses the session memo so the read is not the earlier permission-check copy.
+	ot, err := GetTaskSimple(lockingSession(s), &Task{ID: t.ID})
 	if err != nil {
 		return
 	}
@@ -1383,7 +1401,26 @@ func (t *Task) updateSingleTask(s *xorm.Session, a web.Auth, fields []string) (e
 
 	// If the task is being moved between projects, make sure to move the bucket + index as well
 	if t.ProjectID != 0 && ot.ProjectID != t.ProjectID {
-		t.Index, err = calculateNextTaskIndex(s, t.ProjectID)
+		// Another task may already hold this retired address; the latest holder wins.
+		alias := &TaskIndexAlias{ProjectID: ot.ProjectID, Index: ot.Index}
+		has, err := s.Get(alias)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !has:
+			_, err = s.Insert(&TaskIndexAlias{ProjectID: ot.ProjectID, Index: ot.Index, TaskID: ot.ID})
+		case alias.TaskID != ot.ID:
+			_, err = s.Where("project_id = ? AND `index` = ?", ot.ProjectID, ot.Index).
+				Cols("task_id").
+				Update(&TaskIndexAlias{TaskID: ot.ID})
+		}
+		if err != nil {
+			return err
+		}
+
+		t.Index = 0
+		err = setNewTaskIndexes(s, t.ProjectID, []*Task{t})
 		if err != nil {
 			return err
 		}
@@ -1393,6 +1430,12 @@ func (t *Task) updateSingleTask(s *xorm.Session, a web.Auth, fields []string) (e
 
 	views := []*ProjectView{}
 	if t.Done != ot.Done || t.ProjectID != ot.ProjectID {
+		// Locks both projects: a move rewrites task_positions in the old project too.
+		_, err = lockProjectViewsForPositionUpdate(s, ot.ProjectID, t.ProjectID)
+		if err != nil {
+			return
+		}
+
 		err = s.
 			Where("project_id = ? AND view_kind = ? AND bucket_configuration_mode = ?",
 				t.ProjectID, ProjectViewKindKanban, BucketConfigurationModeManual).
@@ -1634,6 +1677,26 @@ func (t *Task) updateSingleTask(s *xorm.Session, a web.Auth, fields []string) (e
 // updateTasks updates multiple tasks with the same payload.
 // If fields is nil, it updates the default set of columns.
 func updateTasks(s *xorm.Session, a web.Auth, t *Task, ids []int64, fields []string) (tasks []*Task, err error) {
+	// Ids may span projects; per-task locking would follow caller order, not view order.
+	existing := []*Task{}
+	err = s.Table(&Task{}).Where(builder.In("id", ids)).Distinct("project_id").Find(&existing)
+	if err != nil {
+		return nil, fmt.Errorf("could not load projects of tasks to update: %w", err)
+	}
+
+	projectIDs := make([]int64, 0, len(existing)+1)
+	for _, et := range existing {
+		projectIDs = append(projectIDs, et.ProjectID)
+	}
+	if t.ProjectID != 0 {
+		projectIDs = append(projectIDs, t.ProjectID)
+	}
+
+	_, err = lockProjectViewsForPositionUpdate(s, projectIDs...)
+	if err != nil {
+		return nil, fmt.Errorf("could not lock project views for bulk task update: %w", err)
+	}
+
 	for _, id := range ids {
 		nt := clone.Clone(t)
 		nt.ID = id
@@ -2076,6 +2139,11 @@ func (t *Task) Delete(s *xorm.Session, a web.Auth) (err error) {
 		return err
 	}
 
+	_, err = lockProjectViewsForPositionUpdate(s, fullTask.ProjectID)
+	if err != nil {
+		return
+	}
+
 	// Bucket and position rows are removed right away because bucket counts
 	// don't join the tasks table and would leak soft-deleted tasks; the heal
 	// routines re-create them on restore. All other related data is kept until
@@ -2204,6 +2272,11 @@ func hardDeleteTask(s *xorm.Session, t *Task) (err error) {
 	}
 
 	_, err = s.Where("task_id = ?", t.ID).Delete(&TaskBucket{})
+	if err != nil {
+		return
+	}
+
+	_, err = s.Where("task_id = ?", t.ID).Delete(&TaskIndexAlias{})
 	if err != nil {
 		return
 	}

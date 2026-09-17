@@ -145,6 +145,7 @@ const (
 	LogDatabase      Key = `log.database`
 	LogDatabaseLevel Key = `log.databaselevel`
 	LogHTTP          Key = `log.http`
+	LogHTTPLevel     Key = `log.httplevel`
 	LogPath          Key = `log.path`
 	LogEvents        Key = `log.events`
 	LogEventsLevel   Key = `log.eventslevel`
@@ -158,6 +159,7 @@ const (
 	RateLimitStore             Key = `ratelimit.store`
 	RateLimitNoAuthRoutesLimit Key = `ratelimit.noauthlimit`
 	RateLimitTokenRefreshLimit Key = `ratelimit.tokenrefreshlimit`
+	RateLimitBasicAuthLimit    Key = `ratelimit.basicauthlimit`
 
 	FilesBasePath Key = `files.basepath`
 	FilesMaxSize  Key = `files.maxsize`
@@ -184,6 +186,11 @@ const (
 	MigrationMicrosoftTodoClientID     Key = `migration.microsofttodo.clientid`
 	MigrationMicrosoftTodoClientSecret Key = `migration.microsofttodo.clientsecret`
 	MigrationMicrosoftTodoRedirectURL  Key = `migration.microsofttodo.redirecturl`
+	MigrationClaimTimeout              Key = `migration.claimtimeout`
+	MigrationMaxCSVRows                Key = `migration.maxcsvrows`
+	MigrationVikunjaFileMaxSize        Key = `migration.vikunjafile.maxsize`
+	MigrationVikunjaFileMaxFiles       Key = `migration.vikunjafile.maxfiles`
+	MigrationVikunjaFileMaxUserStorage Key = `migration.vikunjafile.maxuserstorage`
 
 	CorsEnable  Key = `cors.enable`
 	CorsOrigins Key = `cors.origins`
@@ -203,6 +210,7 @@ const (
 	MetricsEnabled  Key = `metrics.enabled`
 	MetricsUsername Key = `metrics.username`
 	MetricsPassword Key = `metrics.password`
+	MetricsPprof    Key = `metrics.pprof`
 
 	DefaultSettingsAvatarProvider              Key = `defaultsettings.avatar_provider`
 	DefaultSettingsAvatarFileID                Key = `defaultsettings.avatar_file_id`
@@ -309,6 +317,15 @@ func (k Key) setDefault(i interface{}) {
 	viper.SetDefault(string(k), i)
 }
 
+// Per-category log levels fall back to log.level unless set explicitly.
+func applyDefaultLogLevels() {
+	for _, k := range []Key{LogDatabaseLevel, LogHTTPLevel, LogEventsLevel, LogMailLevel} {
+		if k.GetString() == "" {
+			k.Set(LogLevel.GetString())
+		}
+	}
+}
+
 // getRootpathLocation determines the default root path for Vikunja data.
 // It prefers the current working directory, which respects systemd's
 // WorkingDirectory= setting and is the most intuitive default.
@@ -413,7 +430,7 @@ func initDefaultConfig() {
 	DatabasePath.setDefault(ResolvePath("vikunja.db"))
 	DatabaseMaxOpenConnections.setDefault(100)
 	DatabaseMaxIdleConnections.setDefault(50)
-	DatabaseMaxConnectionLifetime.setDefault(10000)
+	DatabaseMaxConnectionLifetime.setDefault(1800000)
 	DatabaseSslMode.setDefault("disable")
 	DatabaseSslCert.setDefault("")
 	DatabaseSslKey.setDefault("")
@@ -444,13 +461,14 @@ func initDefaultConfig() {
 	LogLevel.setDefault("INFO")
 	LogFormat.setDefault("text")
 	LogDatabase.setDefault("off")
-	LogDatabaseLevel.setDefault("WARNING")
+	LogDatabaseLevel.setDefault("")
 	LogHTTP.setDefault("stdout")
+	LogHTTPLevel.setDefault("")
 	LogPath.setDefault(ResolvePath("logs"))
 	LogEvents.setDefault("off")
-	LogEventsLevel.setDefault("INFO")
+	LogEventsLevel.setDefault("")
 	LogMail.setDefault("off")
-	LogMailLevel.setDefault("INFO")
+	LogMailLevel.setDefault("")
 	// Rate Limit
 	RateLimitEnabled.setDefault(false)
 	RateLimitKind.setDefault("user")
@@ -459,6 +477,7 @@ func initDefaultConfig() {
 	RateLimitStore.setDefault("memory")
 	RateLimitNoAuthRoutesLimit.setDefault(10)
 	RateLimitTokenRefreshLimit.setDefault(60)
+	RateLimitBasicAuthLimit.setDefault(10)
 	// Files
 	FilesBasePath.setDefault("files")
 	FilesMaxSize.setDefault("20MB")
@@ -480,6 +499,11 @@ func initDefaultConfig() {
 	MigrationTodoistEnable.setDefault(false)
 	MigrationTrelloEnable.setDefault(false)
 	MigrationMicrosoftTodoEnable.setDefault(false)
+	MigrationClaimTimeout.setDefault("5m")
+	MigrationMaxCSVRows.setDefault(100000)
+	MigrationVikunjaFileMaxSize.setDefault("256MB")
+	MigrationVikunjaFileMaxFiles.setDefault(10000)
+	MigrationVikunjaFileMaxUserStorage.setDefault("1GB")
 	// Avatar
 	AvatarGravaterExpiration.setDefault(3600)
 	AvatarGravatarBaseURL.setDefault("https://www.gravatar.com")
@@ -491,6 +515,7 @@ func initDefaultConfig() {
 	KeyvalueType.setDefault("memory")
 	// Metrics
 	MetricsEnabled.setDefault(false)
+	MetricsPprof.setDefault(false)
 	// Settings
 	DefaultSettingsAvatarProvider.setDefault("initials")
 	DefaultSettingsOverdueTaskRemindersEnabled.setDefault(true)
@@ -748,6 +773,8 @@ func InitConfig() {
 	}
 
 	generateServiceSecretIfEmpty()
+
+	applyDefaultLogLevels()
 
 	if _, err := url.ParseRequestURI(AvatarGravatarBaseURL.GetString()); err != nil {
 		log.Fatalf("Could not parse gravatarbaseurl: %s", err)

@@ -86,9 +86,14 @@
 
 				<Popup
 					v-if="+new Date(task.dueDate) > 0"
+					placement="bottom-start"
+					:anchor="dueDateTriggerEl"
+					sheet-on-mobile
+					:sheet-title="$t('task.deferDueDate.title')"
 				>
 					<template #trigger="{toggle, isOpen}">
 						<BaseButton
+							ref="dueDateTrigger"
 							v-tooltip="formatDateLong(task.dueDate)"
 							class="dueDate"
 							@click.prevent.stop="toggle()"
@@ -106,7 +111,6 @@
 						<DeferTask
 							v-if="isOpen"
 							v-model="task"
-							@update:modelValue="deferTaskUpdate"
 						/>
 					</template>
 				</Popup>
@@ -222,8 +226,8 @@ import TaskService from '@/services/task'
 import {formatDisplayDate, formatISO, formatDateLong} from '@/helpers/time/formatDate'
 import {success} from '@/message'
 
-import {useProjectStore} from '@/stores/projects'
-import {useBaseStore} from '@/stores/base'
+import {useProjects} from '@/composables/useProjects'
+import {useCurrentProject} from '@/composables/useCurrentProject'
 import {useTaskStore} from '@/stores/tasks'
 import AssigneeList from '@/components/tasks/partials/AssigneeList.vue'
 import {useIntervalFn} from '@vueuse/core'
@@ -277,21 +281,15 @@ watch(
 	},
 )
 
-const baseStore = useBaseStore()
-const projectStore = useProjectStore()
+const projectList = useProjects()
 const taskStore = useTaskStore()
 
-const project = computed(() => projectStore.projects[task.value.projectId])
-const projectColor = computed(() => project.value ? project.value?.hexColor : '')
+const project = computed(() => projectList.projects[task.value.projectId])
+const projectColor = computed(() => project.value?.hex_color ?? '')
 
 const showProjectSeparately = computed(() => !props.showProject && currentProject.value?.id !== task.value.projectId && project.value)
 
-const currentProject = computed(() => {
-	return typeof baseStore.currentProject === 'undefined' ? {
-		id: 0,
-		title: '',
-	} : baseStore.currentProject
-})
+const {currentProject} = useCurrentProject()
 
 const taskDetailRoute = computed(() => ({
 	name: 'task.detail',
@@ -383,6 +381,8 @@ async function toggleFavorite() {
 }
 
 const taskRoot = ref<HTMLElement | null>(null)
+const dueDateTrigger = ref<InstanceType<typeof BaseButton> | null>(null)
+const dueDateTriggerEl = computed<HTMLElement | null>(() => dueDateTrigger.value?.$el ?? null)
 const taskLinkRef = ref<HTMLElement | null>(null)
 
 function hasTextSelected() {
@@ -618,8 +618,7 @@ defineExpose({
 	background-color: var(--white);
 	box-shadow: var(--shadow-lg);
 	color: var(--text);
-	inset-block-start: unset;
-	
+
 	&.is-open {
 		padding: 1rem;
 		border: 1px solid var(--grey-200);

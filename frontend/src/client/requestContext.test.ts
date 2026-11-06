@@ -5,6 +5,7 @@ import {
 	assertClientRequestContext,
 	captureClientRequestContext,
 	isClientRequestContextCurrent,
+	isRequestContextAbort,
 } from './requestContext'
 
 function token(id: number, type = 1): string {
@@ -26,7 +27,7 @@ function expectStaleContext(context: ReturnType<typeof captureClientRequestConte
 describe('client request context', () => {
 	beforeEach(() => {
 		removeToken()
-		window.API_URL = 'https://identity-a.example/api/v1/'
+		window.API_URL = 'https://identity-a.example'
 		saveToken(token(1), false)
 	})
 
@@ -57,8 +58,32 @@ describe('client request context', () => {
 	it('rejects a different API URL', () => {
 		const context = captureClientRequestContext()
 
-		window.API_URL = 'https://identity-b.example/api/v1/'
+		window.API_URL = 'https://identity-b.example'
 
 		expectStaleContext(context)
+	})
+
+	it('treats a legacy suffixed URL for the same server as the same API', () => {
+		const context = captureClientRequestContext()
+
+		window.API_URL = 'https://identity-a.example/api/v1/'
+
+		expect(isClientRequestContextCurrent(context)).toBe(true)
+	})
+
+	it('recognizes its own abort and nothing else', () => {
+		const context = captureClientRequestContext()
+		saveToken(token(2), false)
+
+		expect(() => assertClientRequestContext(context)).toThrow(expect.objectContaining({name: 'AbortError'}))
+		try {
+			assertClientRequestContext(context)
+		} catch (cause) {
+			expect(isRequestContextAbort(cause)).toBe(true)
+		}
+		expect(isRequestContextAbort({status: 404})).toBe(false)
+		expect(isRequestContextAbort(new Error('Server is on fire'))).toBe(false)
+		expect(isRequestContextAbort(null)).toBe(false)
+		expect(isRequestContextAbort(undefined)).toBe(false)
 	})
 })

@@ -280,6 +280,17 @@ func TestLabel_ReadOne(t *testing.T) {
 		Updated:                      testUpdatedTime,
 		ExportFileID:                 1,
 	}
+	botOwnerA := &user.User{
+		ID:                           21,
+		Username:                     "user_bot_owner_a",
+		Password:                     "$2a$04$X4aRMEt0ytgPwMIgv36cI..7X9.nhY/.tYwxpqSi0ykRHx2CwQ0S6",
+		Issuer:                       "local",
+		EmailRemindersEnabled:        true,
+		OverdueTasksRemindersEnabled: true,
+		OverdueTasksRemindersTime:    "09:00",
+		Created:                      testCreatedTime,
+		Updated:                      testUpdatedTime,
+	}
 	tests := []struct {
 		name                string
 		fields              fields
@@ -460,6 +471,7 @@ func TestLabel_ReadOne(t *testing.T) {
 					Username:                     "bot-owner-a-assistant",
 					Issuer:                       "local",
 					BotOwnerID:                   21,
+					BotOwner:                     botOwnerA,
 					EmailRemindersEnabled:        true,
 					OverdueTasksRemindersEnabled: true,
 					OverdueTasksRemindersTime:    "09:00",
@@ -536,6 +548,7 @@ func TestLabel_ReadOne(t *testing.T) {
 					Username:                     "bot-owner-a-scheduler",
 					Issuer:                       "local",
 					BotOwnerID:                   21,
+					BotOwner:                     botOwnerA,
 					EmailRemindersEnabled:        true,
 					OverdueTasksRemindersEnabled: true,
 					OverdueTasksRemindersTime:    "09:00",
@@ -1045,4 +1058,21 @@ func TestLabelVisibleCondIsValid(t *testing.T) {
 			assert.True(t, cond.IsValid())
 		})
 	}
+}
+
+// Regression for #4026: label_tasks has no soft-delete column, so a deleted
+// label used to leave its task associations behind forever.
+func TestLabel_DeleteRemovesTaskAssociations(t *testing.T) {
+	db.LoadAndAssertFixtures(t)
+	s := db.NewSession()
+	defer s.Close()
+
+	// Label 8 was created by user 1 and is attached to task 34.
+	l := &Label{ID: 8}
+	require.NoError(t, l.Delete(s, &user.User{ID: 1}))
+	require.NoError(t, s.Commit())
+
+	db.AssertMissing(t, "labels", map[string]interface{}{"id": 8})
+	db.AssertMissing(t, "label_tasks", map[string]interface{}{"label_id": 8})
+	db.AssertExists(t, "label_tasks", map[string]interface{}{"label_id": 4, "task_id": 1}, false)
 }

@@ -10,24 +10,21 @@ import QuickActions from '@/components/quick-actions/QuickActions.vue'
 import {useBaseStore} from '@/stores/base'
 import {normalizeProject, type ProjectResponse} from '@/client/queries/projects'
 import en from '@/i18n/lang/en.json'
+import type {QuickAddPrefill} from '@/helpers/quickAddPrefill'
 
-vi.mock('@/services/task', () => ({
-	default: class {
-		loading = false
-		getAll = vi.fn(async () => [])
-	},
+const sdk = vi.hoisted(() => ({
+	teamsList: vi.fn(async () => ({data: {items: []}})),
+	tasksList: vi.fn(async () => ({data: {items: []}})),
+	labelsList: vi.fn(async () => ({data: {items: [], total_pages: 1}})),
+	projectsList: vi.fn(async () => ({data: {items: [], total_pages: 1}})),
+	projectsRead: vi.fn(async () => ({data: {id: 1, title: 'Test'}})),
 }))
 
-vi.mock('@/services/team', () => ({
-	default: class {
-		loading = false
-		getAll = vi.fn(async () => [])
-	},
-}))
+vi.mock('@/client/generated', () => sdk)
 
 const i18n = createI18n({legacy: false, locale: 'en', messages: {en}})
 
-async function mountQuickActions(project: ProjectResponse | null) {
+async function mountQuickActions(project: ProjectResponse | null, prefill: QuickAddPrefill | null = null) {
 	const errors: unknown[] = []
 	const router = createRouter({
 		history: createMemoryHistory(),
@@ -42,7 +39,7 @@ async function mountQuickActions(project: ProjectResponse | null) {
 		setup() {
 			const baseStore = useBaseStore()
 			baseStore.setCurrentProject(project)
-			baseStore.setQuickActionsActive(true)
+			baseStore.setQuickActionsActive(true, prefill)
 			return () => h(QuickActions)
 		},
 	})
@@ -88,5 +85,25 @@ describe('QuickActions', () => {
 
 		expect(errors).toEqual([])
 		expect(wrapper.find('.quick-actions').exists()).toBe(true)
+	})
+
+	it('prevents the Escape keydown default so closing does not leave fullscreen', async () => {
+		const {wrapper, errors} = await mountQuickActions(null)
+
+		const event = new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true})
+		wrapper.get('input.input').element.dispatchEvent(event)
+		await flushPromises()
+
+		expect(errors).toEqual([])
+		expect(event.defaultPrevented).toBe(true)
+		expect(useBaseStore().quickActionsActive).toBe(false)
+	})
+
+	it('opens the new task command with a prefill', async () => {
+		const {wrapper, errors} = await mountQuickActions(null, {title: 'Page', url: 'https://example.com', description: ''})
+
+		expect(errors).toEqual([])
+		expect((wrapper.get('input.input').element as HTMLInputElement).value).toBe('"Page"')
+		expect(wrapper.get('.prefill-description').text()).toContain('https://example.com')
 	})
 })

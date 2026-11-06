@@ -35,7 +35,7 @@ type Label struct {
 	// The label description.
 	Description string `xorm:"longtext null" json:"description" doc:"The label description."`
 	// The color this label has in hex format.
-	HexColor string `xorm:"varchar(6) null" json:"hex_color" valid:"runelength(0|7)" maxLength:"7" doc:"The color this label has in hex format."`
+	HexColor string `xorm:"varchar(6) null" json:"hex_color" valid:"hexcolor" maxLength:"7" doc:"The color this label has in hex format."`
 
 	CreatedByID int64 `xorm:"bigint not null" json:"-"`
 	// The user who created this label
@@ -131,6 +131,12 @@ func (l *Label) Update(s *xorm.Session, a web.Auth) (err error) {
 // @Failure 500 {object} models.Message "Internal error"
 // @Router /labels/{id} [delete]
 func (l *Label) Delete(s *xorm.Session, _ web.Auth) (err error) {
+	// No FK cascade in the schema, so the associations must go explicitly.
+	_, err = s.Where("label_id = ?", l.ID).Delete(&LabelTask{})
+	if err != nil {
+		return err
+	}
+
 	_, err = s.ID(l.ID).Delete(&Label{})
 	return err
 }
